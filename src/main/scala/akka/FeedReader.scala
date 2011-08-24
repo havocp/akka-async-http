@@ -19,6 +19,8 @@ import akka.routing.Routing.Broadcast
 import akka.routing.CyclicIterator
 import akka.routing.Routing
 
+import java.util.concurrent.atomic.AtomicInteger
+
 object FeedReader extends App {
 
   read(nrOfFetchers = 10, nrOfFeeds = 5, fillingRate = 1)
@@ -69,7 +71,7 @@ object FeedReader extends App {
       case CompleteFetch(url) =>
         nrOfFetching -= 1
 
-        EventHandler.info(this, "Finish: %s".format(url))
+        EventHandler.info(this, "%d in flight %d threads Finish: %s".format(Fetcher.httpInFlight.get(), Thread.activeCount, url))
 
         // When the number of completed fetchers reach the filling rate, ask the reader to assign work
         // to the fetchers
@@ -98,6 +100,12 @@ object FeedReader extends App {
   }
 
   object Fetcher {
+    val httpInFlight = new AtomicInteger(0)
+
+    // this needs to be shared or it's pretty
+    // much a leak, we get huge numbers of threads
+    val client = new AsyncHttpClient
+
     val dispatcher =
       Dispatchers.newExecutorBasedEventDrivenWorkStealingDispatcher("pool")
         .setCorePoolSize(100)
@@ -113,6 +121,8 @@ object FeedReader extends App {
       case Fetch(url) =>
         // Fetch the content
         val httpHandler = new AsyncHandler[Response]() {
+          Fetcher.httpInFlight.incrementAndGet()
+
           val builder =
             new Response.ResponseBuilder()
 
@@ -129,17 +139,18 @@ object FeedReader extends App {
             STATE.CONTINUE
           }
           def onHeadersReceived(headers: HttpResponseHeaders) = {
-            EventHandler.info(this, "Content-Type: %s".format(headers.getHeaders.getFirstValue("Content-Type")))
+            //EventHandler.info(this, "Content-Type: %s".format(headers.getHeaders.getFirstValue("Content-Type")))
             STATE.CONTINUE
           }
 
           def onCompleted() = {
+            Fetcher.httpInFlight.decrementAndGet()
+
             builder.build()
           }
         }
 
-        val client = new AsyncHttpClient
-        val response = client.prepareGet(url).execute(httpHandler).get()
+        val response = Fetcher.client.prepareGet(url).execute(httpHandler).get()
 
         self reply CompleteFetch(url)
     }
